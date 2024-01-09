@@ -5,6 +5,7 @@
 #include <execinfo.h>
 #include <frameobject.h>
 
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <functional>
@@ -19,6 +20,55 @@
 
 namespace {
 
+class Timer {
+   public:
+    Timer(std::chrono::time_point<std::chrono::steady_clock> tp =
+              std::chrono::steady_clock::now())
+        : _start_time(tp) {}
+
+    template <typename T>
+    bool Timeout(double count) const {
+        return Passed<T>() >= count;
+    }
+
+    double Passed() const { return Passed<std::chrono::duration<double>>(); }
+
+    double PassedSec() const { return Passed<std::chrono::seconds>(); }
+
+    double PassedMicro() const { return Passed<std::chrono::microseconds>(); }
+
+    double PassedNano() const { return Passed<std::chrono::nanoseconds>(); }
+
+    template <typename T>
+    double Passed() const {
+        return Passed<T>(std::chrono::steady_clock::now());
+    }
+
+    template <typename T>
+    double Passed(std::chrono::time_point<std::chrono::steady_clock> tp) const {
+        const auto elapsed = std::chrono::duration_cast<T>(tp - _start_time);
+        return elapsed.count();
+    }
+
+    uint64_t TimePointMicro() const {
+        return std::chrono::duration_cast<std::chrono::microseconds>(
+                   _start_time.time_since_epoch())
+            .count();
+    }
+
+    void Reset() { _start_time = std::chrono::steady_clock::now(); }
+
+   private:
+    std::chrono::time_point<std::chrono::steady_clock> _start_time;
+};
+
+#define TIMING_CALL(dur, r, func) \
+    {                             \
+        Timer t;                  \
+        r = func;                 \
+        dur = t.Passed();         \
+    }
+
 class XpuRuntimeApiHook;
 
 class XpuRuntimeWrapApi {
@@ -31,6 +81,10 @@ class XpuRuntimeWrapApi {
     static int xpuFree(void* devPtr);
     static int xpuWait(void* devStream);
     static int xpuMemcpy(void* dst, const void* src, uint64_t size, int kind);
+    static int xpuLaunchArgumentSet(const void* arg, uint64_t size,
+                                    uint64_t offset);
+    static int xpuLaunchAsync(void* func);
+    static int xpuLaunchConfig(int nclusters, int ncores, void* stream);
 
    private:
     std::function<int(void**, uint64_t, int)> raw_xpu_malloc_;
@@ -38,6 +92,10 @@ class XpuRuntimeWrapApi {
     std::function<int(int*)> raw_xpu_current_device_;
     std::function<int(void*)> raw_xpu_wait_;
     std::function<int(void*, const void*, uint64_t, int)> raw_xpu_memcpy_;
+    std::function<int(const void*, uint64_t, uint64_t)>
+        raw_xpu_launch_argument_set_;
+    std::function<int(void*)> raw_xpu_launch_async_;
+    std::function<int(int, int, void*)> raw_xpu_launch_config_;
 
     enum class XpuMemKind { GLOBAL_MEMORY = 0, L3_MEMORY };
 
@@ -70,6 +128,7 @@ XpuRuntimeWrapApi::XpuRuntimeWrapApi()
       peak_l3_size_(kMaxXpuDeviceNum, 0) {}
 
 int XpuRuntimeWrapApi::xpuMalloc(void** pDevPtr, uint64_t size, int kind) {
+    double dur = 0;
     int r = 0;
     int devId = 0;
 
@@ -89,7 +148,9 @@ int XpuRuntimeWrapApi::xpuMalloc(void** pDevPtr, uint64_t size, int kind) {
              "devId({}) must less than kMaxXpuDeviceNum({})", devId,
              kMaxXpuDeviceNum);
 
-    r = XpuRuntimeWrapApi::instance().raw_xpu_malloc_(pDevPtr, size, kind);
+    TIMING_CALL(
+        dur, r,
+        XpuRuntimeWrapApi::instance().raw_xpu_malloc_(pDevPtr, size, kind));
     if (r != 0) {
         LOG(WARN) << "[XpuRuntimeWrapApi xpuMalloc][failed] "
                   << "devId=" << devId << ","
@@ -99,7 +160,8 @@ int XpuRuntimeWrapApi::xpuMalloc(void** pDevPtr, uint64_t size, int kind) {
                   << XpuRuntimeWrapApi::instance().allocated_gm_size_[devId]
                   << ","
                   << "gm_peak="
-                  << XpuRuntimeWrapApi::instance().peak_gm_size_[devId];
+                  << XpuRuntimeWrapApi::instance().peak_gm_size_[devId] << ","
+                  << "duration=" << dur;
         return r;
     }
 
@@ -125,12 +187,14 @@ int XpuRuntimeWrapApi::xpuMalloc(void** pDevPtr, uint64_t size, int kind) {
               << "gm_allocated="
               << XpuRuntimeWrapApi::instance().allocated_gm_size_[devId] << ","
               << "gm_peak="
-              << XpuRuntimeWrapApi::instance().peak_gm_size_[devId];
+              << XpuRuntimeWrapApi::instance().peak_gm_size_[devId] << ","
+              << "duration=" << dur;
 
     return r;
 }
 
 int XpuRuntimeWrapApi::xpuFree(void* devPtr) {
+    double dur = 0;
     int r = 0;
     int devId = 0;
 
@@ -150,7 +214,8 @@ int XpuRuntimeWrapApi::xpuFree(void* devPtr) {
              "devId({}) must less than kMaxXpuDeviceNum({})", devId,
              kMaxXpuDeviceNum);
 
-    r = XpuRuntimeWrapApi::instance().raw_xpu_free_(devPtr);
+    TIMING_CALL(dur, r, XpuRuntimeWrapApi::instance().raw_xpu_free_(devPtr));
+    LOG(WARN) << "[XpuRuntimeWrapApi xpuFree]: duration=" << dur;
     if (r != 0) {
         return r;
     }
@@ -174,6 +239,18 @@ int XpuRuntimeWrapApi::xpuFree(void* devPtr) {
 }
 
 int XpuRuntimeWrapApi::xpuWait(void* devStream) {
+    double dur = 0;
+    int r = 0;
+
+    CHECK(XpuRuntimeWrapApi::instance().raw_xpu_wait_, "xpu_wait not binded");
+    TIMING_CALL(dur, r, XpuRuntimeWrapApi::instance().raw_xpu_wait_(devStream));
+
+    if (!std::getenv("MOCK_XPU_WAIT")) {
+        LOG(WARN) << "[XpuRuntimeWrapApi xpuWait]:"
+                  << "duration=" << dur;
+        return r;
+    }
+
     constexpr int kMaxStackDeep = 512;
     void* call_stack[kMaxStackDeep] = {0};
     char** symbols = nullptr;
@@ -186,7 +263,7 @@ int XpuRuntimeWrapApi::xpuWait(void* devStream) {
     }
 
     LOG(WARN) << "[XpuRuntimeWrapApi xpuWait]"
-              << "get stack deep num:" << num;
+              << "stack_deep=" << num << ",duration=" << dur;
     Dl_info info;
     for (int j = 0; j < num; j++) {
         if (dladdr(call_stack[j], &info) && info.dli_sname) {
@@ -200,21 +277,32 @@ int XpuRuntimeWrapApi::xpuWait(void* devStream) {
     }
     free(symbols);
 
-    return XpuRuntimeWrapApi::instance().raw_xpu_wait_(devStream);
+    return r;
 }
 
 int XpuRuntimeWrapApi::xpuMemcpy(void* dst, const void* src, uint64_t size,
                                  int kind) {
-    LOG(WARN) << "[XpuRuntimeWrapApi xpuMemcpy]"
-              << "entering PyGILState_Ensure";
+    double dur = 0;
+    int r = 0;
+
+    CHECK(XpuRuntimeWrapApi::instance().raw_xpu_memcpy_,
+          "xpu_memcpy not binded");
+    TIMING_CALL(
+        dur, r,
+        XpuRuntimeWrapApi::instance().raw_xpu_memcpy_(dst, src, size, kind));
+
+    if (!std::getenv("MOCK_XPU_MEMCPY")) {
+        LOG(WARN) << "[XpuRuntimeWrapApi xpuMemcpy]"
+                  << "duration=" << dur;
+        return r;
+    }
 
     // Acquire the Global Interpreter Lock (GIL) before calling Python C API
     // functions from non-Python threads.
     PyGILState_STATE gstate = PyGILState_Ensure();
 
     LOG(WARN) << "[XpuRuntimeWrapApi xpuMemcpy]"
-              << "after PyGILState_Ensure";
-    LOG(WARN) << "[XpuRuntimeWrapApi xpuMemcpy]"
+              << "duration=" << dur << "\n"
               << "Python stack trace:";
     // https://stackoverflow.com/questions/1796510/accessing-a-python-traceback-from-the-c-api
     PyThreadState* tstate = PyThreadState_GET();
@@ -235,7 +323,53 @@ int XpuRuntimeWrapApi::xpuMemcpy(void* dst, const void* src, uint64_t size,
         }
     }
     PyGILState_Release(gstate);
-    return XpuRuntimeWrapApi::instance().raw_xpu_memcpy_(dst, src, size, kind);
+    return r;
+}
+
+int XpuRuntimeWrapApi::xpuLaunchArgumentSet(const void* arg, uint64_t size,
+                                            uint64_t offset) {
+    double dur = 0;
+    int r = 0;
+
+    CHECK(XpuRuntimeWrapApi::instance().raw_xpu_launch_argument_set_,
+          "xpu_launch_argument_set not binded");
+    TIMING_CALL(dur, r,
+                XpuRuntimeWrapApi::instance().raw_xpu_launch_argument_set_(
+                    arg, size, offset));
+
+    LOG(WARN) << "[XpuRuntimeWrapApi xpuLaunchArgumentSet]"
+              << "duration=" << dur;
+    return r;
+}
+
+int XpuRuntimeWrapApi::xpuLaunchAsync(void* func) {
+    double dur = 0;
+    int r = 0;
+
+    CHECK(XpuRuntimeWrapApi::instance().raw_xpu_launch_async_,
+          "xpu_launch_async not binded");
+    TIMING_CALL(dur, r,
+                XpuRuntimeWrapApi::instance().raw_xpu_launch_async_(func));
+
+    LOG(WARN) << "[XpuRuntimeWrapApi xpuLaunchAsync]"
+              << "duration=" << dur;
+    return r;
+}
+
+int XpuRuntimeWrapApi::xpuLaunchConfig(int nclusters, int ncores,
+                                       void* stream) {
+    double dur = 0;
+    int r = 0;
+
+    CHECK(XpuRuntimeWrapApi::instance().raw_xpu_launch_config_,
+          "xpu_launch_config not binded");
+    TIMING_CALL(dur, r,
+                XpuRuntimeWrapApi::instance().raw_xpu_launch_config_(
+                    nclusters, ncores, stream));
+
+    LOG(WARN) << "[XpuRuntimeWrapApi xpuLaunchConfig]"
+              << "duration=" << dur;
+    return r;
 }
 
 struct XpuRuntimeApiHook : public hook::HookInstallerWrap<XpuRuntimeApiHook> {
@@ -246,7 +380,10 @@ struct XpuRuntimeApiHook : public hook::HookInstallerWrap<XpuRuntimeApiHook> {
     bool targetSym(const char* name) {
         return strstr(name, "xpu_malloc") || strstr(name, "xpu_free") ||
                strstr(name, "xpu_current_device") || strstr(name, "xpu_wait") ||
-               strstr(name, "xpu_memcpy");
+               strstr(name, "xpu_memcpy") ||
+               strstr(name, "xpu_launch_argument_set") ||
+               strstr(name, "xpu_launch_async") ||
+               strstr(name, "xpu_launch_config");
     }
 
     void* newFuncPtr(const hook::OriginalInfo& info) {
@@ -294,6 +431,35 @@ struct XpuRuntimeApiHook : public hook::HookInstallerWrap<XpuRuntimeApiHook> {
                               std::placeholders::_3, std::placeholders::_4);
             }
             return reinterpret_cast<void*>(&XpuRuntimeWrapApi::xpuMemcpy);
+        } else if (strstr(curSymName(), "xpu_launch_argument_set")) {
+            LOG(WARN) << "[XpuRuntimeApiHook][xpu_launch_argument_set]:"
+                      << info.libName;
+            if (!XpuRuntimeWrapApi::instance().raw_xpu_launch_argument_set_) {
+                XpuRuntimeWrapApi::instance().raw_xpu_launch_argument_set_ =
+                    std::bind(reinterpret_cast<int((*)(...))>(info.oldFuncPtr),
+                              std::placeholders::_1, std::placeholders::_2,
+                              std::placeholders::_3);
+            }
+            return reinterpret_cast<void*>(&XpuRuntimeWrapApi::xpuLaunchArgumentSet);
+        } else if (strstr(curSymName(), "xpu_launch_async")) {
+            LOG(WARN) << "[XpuRuntimeApiHook][xpu_launch_async]:"
+                      << info.libName;
+            if (!XpuRuntimeWrapApi::instance().raw_xpu_launch_async_) {
+                XpuRuntimeWrapApi::instance().raw_xpu_launch_async_ =
+                    std::bind(reinterpret_cast<int((*)(...))>(info.oldFuncPtr),
+                              std::placeholders::_1);
+            }
+            return reinterpret_cast<void*>(&XpuRuntimeWrapApi::xpuLaunchAsync);
+        } else if (strstr(curSymName(), "xpu_launch_config")) {
+            LOG(WARN) << "[XpuRuntimeApiHook][xpu_launch_config]:"
+                      << info.libName;
+            if (!XpuRuntimeWrapApi::instance().raw_xpu_launch_config_) {
+                XpuRuntimeWrapApi::instance().raw_xpu_launch_config_ =
+                    std::bind(reinterpret_cast<int((*)(...))>(info.oldFuncPtr),
+                              std::placeholders::_1, std::placeholders::_2,
+                              std::placeholders::_3);
+            }
+            return reinterpret_cast<void*>(&XpuRuntimeWrapApi::xpuLaunchConfig);
         }
         CHECK(0, "capture wrong function: {}", curSymName());
         return nullptr;
