@@ -85,17 +85,20 @@ class XpuRuntimeWrapApi {
                                     uint64_t offset);
     static int xpuLaunchAsync(void* func);
     static int xpuLaunchConfig(int nclusters, int ncores, void* stream);
+    static int xpuSetDevice(int devId);
+    static int xpuCurrentDevice(int* devId);
 
    private:
     std::function<int(void**, uint64_t, int)> raw_xpu_malloc_;
     std::function<int(void*)> raw_xpu_free_;
-    std::function<int(int*)> raw_xpu_current_device_;
     std::function<int(void*)> raw_xpu_wait_;
     std::function<int(void*, const void*, uint64_t, int)> raw_xpu_memcpy_;
     std::function<int(const void*, uint64_t, uint64_t)>
         raw_xpu_launch_argument_set_;
     std::function<int(void*)> raw_xpu_launch_async_;
     std::function<int(int, int, void*)> raw_xpu_launch_config_;
+    std::function<int(int)> raw_xpu_set_device_;
+    std::function<int(int*)> raw_xpu_current_device_;
 
     enum class XpuMemKind { GLOBAL_MEMORY = 0, L3_MEMORY };
 
@@ -372,6 +375,36 @@ int XpuRuntimeWrapApi::xpuLaunchConfig(int nclusters, int ncores,
     return r;
 }
 
+int XpuRuntimeWrapApi::xpuSetDevice(int devId) {
+    double dur = 0;
+    int r = 0;
+
+    CHECK(XpuRuntimeWrapApi::instance().raw_xpu_set_device_,
+          "xpu_set_device not binded");
+    TIMING_CALL(dur, r,
+                XpuRuntimeWrapApi::instance().raw_xpu_set_device_(devId));
+
+    LOG(WARN) << "[XpuRuntimeWrapApi xpuSetDevice]"
+              << "devId=" << devId << ","
+              << "duration=" << dur;
+    return r;
+}
+
+int XpuRuntimeWrapApi::xpuCurrentDevice(int* devId) {
+    double dur = 0;
+    int r = 0;
+
+    CHECK(XpuRuntimeWrapApi::instance().raw_xpu_current_device_,
+          "xpu_current_device not binded");
+    TIMING_CALL(dur, r,
+                XpuRuntimeWrapApi::instance().raw_xpu_current_device_(devId));
+
+    LOG(WARN) << "[XpuRuntimeWrapApi xpuCurrentDevice]"
+              << "devId=" << *devId << ","
+              << "duration=" << dur;
+    return r;
+}
+
 struct XpuRuntimeApiHook : public hook::HookInstallerWrap<XpuRuntimeApiHook> {
     bool targetLib(const char* name) {
         return !strstr(name, "libxpurt.so.1") && !strstr(name, "libxpurt.so");
@@ -379,11 +412,12 @@ struct XpuRuntimeApiHook : public hook::HookInstallerWrap<XpuRuntimeApiHook> {
 
     bool targetSym(const char* name) {
         return strstr(name, "xpu_malloc") || strstr(name, "xpu_free") ||
-               strstr(name, "xpu_current_device") || strstr(name, "xpu_wait") ||
-               strstr(name, "xpu_memcpy") ||
+               strstr(name, "xpu_wait") || strstr(name, "xpu_memcpy") ||
                strstr(name, "xpu_launch_argument_set") ||
                strstr(name, "xpu_launch_async") ||
-               strstr(name, "xpu_launch_config");
+               strstr(name, "xpu_launch_config") ||
+               strstr(name, "xpu_set_device") ||
+               strstr(name, "xpu_current_device");
     }
 
     void* newFuncPtr(const hook::OriginalInfo& info) {
@@ -404,16 +438,6 @@ struct XpuRuntimeApiHook : public hook::HookInstallerWrap<XpuRuntimeApiHook> {
                               std::placeholders::_1);
             }
             return reinterpret_cast<void*>(&XpuRuntimeWrapApi::xpuFree);
-        } else if (strstr(curSymName(), "xpu_current_device")) {
-            LOG(WARN) << "[XpuRuntimeApiHook][xpu_current_device]:"
-                      << info.libName;
-            if (!XpuRuntimeWrapApi::instance().raw_xpu_current_device_) {
-                XpuRuntimeWrapApi::instance().raw_xpu_current_device_ =
-                    std::bind(reinterpret_cast<int((*)(...))>(info.oldFuncPtr),
-                              std::placeholders::_1);
-            }
-            // simply use the original function ptr
-            return info.oldFuncPtr;
         } else if (strstr(curSymName(), "xpu_wait")) {
             LOG(WARN) << "[XpuRuntimeApiHook][xpu_wait]:" << info.libName;
             if (!XpuRuntimeWrapApi::instance().raw_xpu_wait_) {
@@ -440,7 +464,8 @@ struct XpuRuntimeApiHook : public hook::HookInstallerWrap<XpuRuntimeApiHook> {
                               std::placeholders::_1, std::placeholders::_2,
                               std::placeholders::_3);
             }
-            return reinterpret_cast<void*>(&XpuRuntimeWrapApi::xpuLaunchArgumentSet);
+            return reinterpret_cast<void*>(
+                &XpuRuntimeWrapApi::xpuLaunchArgumentSet);
         } else if (strstr(curSymName(), "xpu_launch_async")) {
             LOG(WARN) << "[XpuRuntimeApiHook][xpu_launch_async]:"
                       << info.libName;
@@ -460,6 +485,24 @@ struct XpuRuntimeApiHook : public hook::HookInstallerWrap<XpuRuntimeApiHook> {
                               std::placeholders::_3);
             }
             return reinterpret_cast<void*>(&XpuRuntimeWrapApi::xpuLaunchConfig);
+        } else if (strstr(curSymName(), "xpu_set_device")) {
+            LOG(WARN) << "[XpuRuntimeApiHook][xpu_set_device]:" << info.libName;
+            if (!XpuRuntimeWrapApi::instance().raw_xpu_set_device_) {
+                XpuRuntimeWrapApi::instance().raw_xpu_set_device_ =
+                    std::bind(reinterpret_cast<int((*)(...))>(info.oldFuncPtr),
+                              std::placeholders::_1);
+            }
+            return reinterpret_cast<void*>(&XpuRuntimeWrapApi::xpuSetDevice);
+        } else if (strstr(curSymName(), "xpu_current_device")) {
+            LOG(WARN) << "[XpuRuntimeApiHook][xpu_current_device]:"
+                      << info.libName;
+            if (!XpuRuntimeWrapApi::instance().raw_xpu_current_device_) {
+                XpuRuntimeWrapApi::instance().raw_xpu_current_device_ =
+                    std::bind(reinterpret_cast<int((*)(...))>(info.oldFuncPtr),
+                              std::placeholders::_1);
+            }
+            return reinterpret_cast<void*>(
+                &XpuRuntimeWrapApi::xpuCurrentDevice);
         }
         CHECK(0, "capture wrong function: {}", curSymName());
         return nullptr;
