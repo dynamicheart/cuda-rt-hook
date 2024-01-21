@@ -20,6 +20,60 @@
 
 namespace {
 
+void cppBacktrace() {
+    constexpr int kMaxStackDeep = 512;
+    void* call_stack[kMaxStackDeep] = {0};
+    char** symbols = nullptr;
+    int num = backtrace(call_stack, kMaxStackDeep);
+    CHECK(num > 0, "Expect frams num {} > 0!", num);
+    CHECK(num <= kMaxStackDeep, "Expect frams num {} <= 512!", num);
+    symbols = backtrace_symbols(call_stack, num);
+    if (symbols == nullptr) {
+        return;
+    }
+
+    LOG(WARN) << "stack_deep=" << num;
+    Dl_info info;
+    for (int j = 0; j < num; j++) {
+        if (dladdr(call_stack[j], &info) && info.dli_sname) {
+            auto demangled = __support__demangle(info.dli_sname);
+            std::string path(info.dli_fname);
+            LOG(WARN) << "    frame " << j << path << ":" << demangled;
+        } else {
+            // filtering useless print
+            // LOG(WARN) << "    frame " << j << call_stack[j];
+        }
+    }
+    free(symbols);
+}
+
+void pythonBacktrace() {
+    // Acquire the Global Interpreter Lock (GIL) before calling Python C API
+    // functions from non-Python threads.
+    PyGILState_STATE gstate = PyGILState_Ensure();
+
+    LOG(WARN) << "Python stack trace:";
+    // https://stackoverflow.com/questions/1796510/accessing-a-python-traceback-from-the-c-api
+    PyThreadState* tstate = PyThreadState_GET();
+    if (NULL != tstate && NULL != tstate->frame) {
+        PyFrameObject* frame = tstate->frame;
+
+        while (NULL != frame) {
+            // int line = frame->f_lineno;
+            /*
+            frame->f_lineno will not always return the correct line number
+            you need to call PyCode_Addr2Line().
+            */
+            int line = PyCode_Addr2Line(frame->f_code, frame->f_lasti);
+            const char* filename = PyUnicode_AsUTF8(frame->f_code->co_filename);
+            const char* funcname = PyUnicode_AsUTF8(frame->f_code->co_name);
+            LOG(WARN) << "    " << filename << "(" << line << "): " << funcname;
+            frame = frame->f_back;
+        }
+    }
+    PyGILState_Release(gstate);
+}
+
 class Timer {
    public:
     Timer(std::chrono::time_point<std::chrono::steady_clock> tp =
@@ -254,32 +308,7 @@ int XpuRuntimeWrapApi::xpuWait(void* devStream) {
         return r;
     }
 
-    constexpr int kMaxStackDeep = 512;
-    void* call_stack[kMaxStackDeep] = {0};
-    char** symbols = nullptr;
-    int num = backtrace(call_stack, kMaxStackDeep);
-    CHECK(num > 0, "Expect frams num {} > 0!", num);
-    CHECK(num <= kMaxStackDeep, "Expect frams num {} <= 512!", num);
-    symbols = backtrace_symbols(call_stack, num);
-    if (symbols == nullptr) {
-        return false;
-    }
-
-    LOG(WARN) << "[XpuRuntimeWrapApi xpuWait]"
-              << "stack_deep=" << num << ",duration=" << dur;
-    Dl_info info;
-    for (int j = 0; j < num; j++) {
-        if (dladdr(call_stack[j], &info) && info.dli_sname) {
-            auto demangled = __support__demangle(info.dli_sname);
-            std::string path(info.dli_fname);
-            LOG(WARN) << "    frame " << j << path << ":" << demangled;
-        } else {
-            // filtering useless print
-            // LOG(WARN) << "    frame " << j << call_stack[j];
-        }
-    }
-    free(symbols);
-
+    cppBacktrace();
     return r;
 }
 
@@ -300,32 +329,7 @@ int XpuRuntimeWrapApi::xpuMemcpy(void* dst, const void* src, uint64_t size,
         return r;
     }
 
-    // Acquire the Global Interpreter Lock (GIL) before calling Python C API
-    // functions from non-Python threads.
-    PyGILState_STATE gstate = PyGILState_Ensure();
-
-    LOG(WARN) << "[XpuRuntimeWrapApi xpuMemcpy]"
-              << "duration=" << dur << "\n"
-              << "Python stack trace:";
-    // https://stackoverflow.com/questions/1796510/accessing-a-python-traceback-from-the-c-api
-    PyThreadState* tstate = PyThreadState_GET();
-    if (NULL != tstate && NULL != tstate->frame) {
-        PyFrameObject* frame = tstate->frame;
-
-        while (NULL != frame) {
-            // int line = frame->f_lineno;
-            /*
-            frame->f_lineno will not always return the correct line number
-            you need to call PyCode_Addr2Line().
-            */
-            int line = PyCode_Addr2Line(frame->f_code, frame->f_lasti);
-            const char* filename = PyUnicode_AsUTF8(frame->f_code->co_filename);
-            const char* funcname = PyUnicode_AsUTF8(frame->f_code->co_name);
-            LOG(WARN) << "    " << filename << "(" << line << "): " << funcname;
-            frame = frame->f_back;
-        }
-    }
-    PyGILState_Release(gstate);
+    pythonBacktrace();
     return r;
 }
 
@@ -387,6 +391,13 @@ int XpuRuntimeWrapApi::xpuSetDevice(int devId) {
     LOG(WARN) << "[XpuRuntimeWrapApi xpuSetDevice]"
               << "devId=" << devId << ","
               << "duration=" << dur;
+
+    if (!std::getenv("MOCK_XPU_SET_DEVICE")) {
+        return r;
+    }
+
+    cppBacktrace();
+    pythonBacktrace();
     return r;
 }
 
@@ -402,6 +413,13 @@ int XpuRuntimeWrapApi::xpuCurrentDevice(int* devId) {
     LOG(WARN) << "[XpuRuntimeWrapApi xpuCurrentDevice]"
               << "devId=" << *devId << ","
               << "duration=" << dur;
+
+    if (!std::getenv("MOCK_XPU_CURRENT_DEVICE")) {
+        return r;
+    }
+
+    cppBacktrace();
+    pythonBacktrace();
     return r;
 }
 
