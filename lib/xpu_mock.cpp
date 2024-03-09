@@ -380,6 +380,24 @@ int XpuRuntimeWrapApi::xpuLaunchConfig(int nclusters, int ncores,
 }
 
 int XpuRuntimeWrapApi::xpuSetDevice(int devId) {
+    switch(devId) {
+        case 4:
+            devId = 6;
+            break;
+        case 5:
+            devId = 7;
+            break;
+        case 6:
+            devId = 4;
+            break;
+        case 7:
+            devId = 5;
+            break;
+        default:
+            break;
+    }
+    return XpuRuntimeWrapApi::instance().raw_xpu_set_device_(devId);
+
     double dur = 0;
     int r = 0;
 
@@ -402,6 +420,25 @@ int XpuRuntimeWrapApi::xpuSetDevice(int devId) {
 }
 
 int XpuRuntimeWrapApi::xpuCurrentDevice(int* devId) {
+    int ret = XpuRuntimeWrapApi::instance().raw_xpu_current_device_(devId);
+    switch(*devId) {
+        case 4:
+            *devId = 6;
+            break;
+        case 5:
+            *devId = 7;
+            break;
+        case 6:
+            *devId = 4;
+            break;
+        case 7:
+            *devId = 5;
+            break;
+        default:
+            break;
+    }
+    return ret;
+
     double dur = 0;
     int r = 0;
 
@@ -429,12 +466,12 @@ struct XpuRuntimeApiHook : public hook::HookInstallerWrap<XpuRuntimeApiHook> {
     }
 
     bool targetSym(const char* name) {
-        return strstr(name, "xpu_malloc") || strstr(name, "xpu_free") ||
-               strstr(name, "xpu_wait") || strstr(name, "xpu_memcpy") ||
-               strstr(name, "xpu_launch_argument_set") ||
-               strstr(name, "xpu_launch_async") ||
-               strstr(name, "xpu_launch_config") ||
-               strstr(name, "xpu_set_device") ||
+        // return strstr(name, "xpu_malloc") || strstr(name, "xpu_free") ||
+        //        strstr(name, "xpu_wait") || strstr(name, "xpu_memcpy") ||
+        //        strstr(name, "xpu_launch_argument_set") ||
+        //        strstr(name, "xpu_launch_async") ||
+        //        strstr(name, "xpu_launch_config") ||
+        return strstr(name, "xpu_set_device") ||
                strstr(name, "xpu_current_device");
     }
 
