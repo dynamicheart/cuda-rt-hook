@@ -246,7 +246,10 @@ int XpuRuntimeWrapApi::xpuMalloc(void** pDevPtr, uint64_t size, int kind) {
               << "gm_peak="
               << XpuRuntimeWrapApi::instance().peak_gm_size_[devId] << ","
               << "duration=" << dur;
-
+    if (std::getenv("BACKTRACE_XPU_MALLOC")) {
+        cppBacktrace();
+        pythonBacktrace();
+    }
     return r;
 }
 
